@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.5
+"""Fatture in Cloud MCP Server - v1.6
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
 
-Changelog v1.5:
-- NEW: create_credit_note - crea nota di credito; importi positivi in input,
-  negativi automaticamente (standard FIC); source_invoice_id opzionale
-- NEW: create_proforma - crea proforma; stessa struttura di create_invoice,
-  tipo proforma, non inviabile allo SDI
-- CHANGE: list_invoices accetta parametro 'type': invoice (default),
-  credit_note, proforma
+Changelog v1.6:
+- NEW: update_document - modifica parziale di qualsiasi documento bozza
+  (fattura, NDC, proforma): data, oggetto, righe, giorni pagamento.
+  Carica l'originale e applica solo i campi forniti (patch parziale).
 
 Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
@@ -124,9 +121,7 @@ def build_items_list(items_data, negate=False):
 
 def build_issued_document(doc_type, client_id, items_data, date_str, payment_days,
                           visible_subject, negate_prices=False, source_invoice_id=None):
-    """Costruisce e crea un documento emesso (fattura, ndc, proforma).
-    Restituisce (result_dict, error_str).
-    """
+    """Costruisce e crea un documento emesso. Restituisce (result_dict, error_str)."""
     client_data = get_client_by_id(client_id)
     if not client_data:
         return None, f"Cliente con ID {client_id} non trovato"
@@ -156,13 +151,9 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
             "payment_terms": {"days": payment_days, "type": "standard"}
         }]
     }
-
-    # Fatture e NDC sono elettroniche
     if doc_type in ("invoice", "credit_note"):
         body_data["e_invoice"] = True
         body_data["ei_data"] = {"payment_method": "MP05"}
-
-    # Collega alla fattura originale se specificata
     if source_invoice_id:
         body_data["original_document"] = {"id": source_invoice_id}
 
@@ -196,7 +187,7 @@ async def list_tools():
         "properties": {
             "name": {"type": "string", "description": "Nome prodotto/servizio"},
             "description": {"type": "string", "description": "Descrizione estesa"},
-            "qty": {"type": "number", "description": "Quantità"},
+            "qty": {"type": "number", "description": "Quantit\u00e0"},
             "net_price": {"type": "number", "description": "Prezzo netto unitario (sempre positivo)"},
             "vat_rate": {"type": "number", "description": "Aliquota IVA (es. 22)"}
         },
@@ -206,7 +197,7 @@ async def list_tools():
     return [
         Tool(
             name="list_invoices",
-            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma — default: invoice)",
+            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma \u2014 default: invoice)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -220,7 +211,7 @@ async def list_tools():
         ),
         Tool(
             name="get_invoice",
-            description="Dettaglio fattura per ID (funziona anche per NDC e proforma)",
+            description="Dettaglio documento per ID (fattura, NDC, proforma)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -261,12 +252,12 @@ async def list_tools():
         ),
         Tool(
             name="create_credit_note",
-            description="Crea nota di credito (bozza). Gli importi vanno passati POSITIVI, vengono resi negativi automaticamente. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            description="Crea nota di credito (bozza). Importi POSITIVI in input, resi negativi automaticamente. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "client_id": {"type": "integer", "description": "ID cliente"},
-                    "items": {"type": "array", "items": item_schema, "description": "Importi positivi, verranno resi negativi automaticamente"},
+                    "items": {"type": "array", "items": item_schema},
                     "date": {"type": "string", "description": "Data YYYY-MM-DD (default: oggi)"},
                     "payment_days": {"type": "integer", "description": "Giorni pagamento (default: 30)"},
                     "visible_subject": {"type": "string", "description": "Oggetto visibile"},
@@ -277,7 +268,7 @@ async def list_tools():
         ),
         Tool(
             name="create_proforma",
-            description="Crea documento proforma (bozza). Non viene inviato allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            description="Crea proforma (bozza). Non inviabile allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -288,6 +279,25 @@ async def list_tools():
                     "visible_subject": {"type": "string", "description": "Oggetto visibile"}
                 },
                 "required": ["client_id", "items"]
+            }
+        ),
+        Tool(
+            name="update_document",
+            description="Modifica parziale di un documento BOZZA (fattura, NDC, proforma). Passa solo i campi da aggiornare: se non passi 'items', le righe restano invariate. Funziona solo su documenti non ancora inviati allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID documento da modificare"},
+                    "date": {"type": "string", "description": "Nuova data YYYY-MM-DD (opzionale)"},
+                    "visible_subject": {"type": "string", "description": "Nuovo oggetto visibile (opzionale)"},
+                    "payment_days": {"type": "integer", "description": "Nuovi giorni pagamento (opzionale)"},
+                    "items": {
+                        "type": "array",
+                        "items": item_schema,
+                        "description": "Nuove righe documento (opzionale - se omesso le righe restano invariate). Per NDC, importi sempre positivi."
+                    }
+                },
+                "required": ["document_id"]
             }
         ),
         Tool(
@@ -313,44 +323,44 @@ async def list_tools():
         ),
         Tool(
             name="delete_invoice",
-            description="Elimina una fattura BOZZA (non inviata). ATTENZIONE: Azione irreversibile! Chiedere SEMPRE conferma esplicita all'utente.",
+            description="Elimina un documento BOZZA (fattura, NDC, proforma). ATTENZIONE: Azione irreversibile! Chiedere SEMPRE conferma esplicita all'utente.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "integer", "description": "ID fattura da eliminare"}
+                    "document_id": {"type": "integer", "description": "ID documento da eliminare"}
                 },
                 "required": ["document_id"]
             }
         ),
         Tool(
             name="send_to_sdi",
-            description="Invia fattura allo SDI (Sistema di Interscambio). ATTENZIONE: Azione irreversibile! Chiedere SEMPRE conferma esplicita all'utente.",
+            description="Invia fattura/NDC allo SDI. ATTENZIONE: Azione irreversibile! Chiedere SEMPRE conferma esplicita all'utente.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "integer", "description": "ID fattura da inviare"}
+                    "document_id": {"type": "integer", "description": "ID documento da inviare"}
                 },
                 "required": ["document_id"]
             }
         ),
         Tool(
             name="get_invoice_status",
-            description="Controlla stato e-invoice/SDI di una fattura",
+            description="Controlla stato e-invoice/SDI di un documento",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "integer", "description": "ID fattura"}
+                    "document_id": {"type": "integer", "description": "ID documento"}
                 },
                 "required": ["document_id"]
             }
         ),
         Tool(
             name="send_email",
-            description="Invia copia cortesia fattura via email al cliente. IMPORTANTE: Chiedere conferma prima di eseguire.",
+            description="Invia copia cortesia via email al cliente. IMPORTANTE: Chiedere conferma prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "integer", "description": "ID fattura"},
+                    "document_id": {"type": "integer", "description": "ID documento"},
                     "recipient_email": {"type": "string", "description": "Email destinatario (opzionale)"},
                     "subject": {"type": "string", "description": "Oggetto email (opzionale)"},
                     "body": {"type": "string", "description": "Corpo email (opzionale)"}
@@ -384,7 +394,7 @@ async def list_tools():
         ),
         Tool(
             name="check_numeration",
-            description="Verifica continuità numerica delle fatture emesse per un dato anno.",
+            description="Verifica continuit\u00e0 numerica delle fatture emesse per un dato anno.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -411,13 +421,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 q = f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'"
 
             response = issued_api.list_issued_documents(
-                company_id=COMPANY_ID,
-                type=doc_type,
-                q=q,
-                per_page=100,
-                fieldset="detailed"
+                company_id=COMPANY_ID, type=doc_type, q=q, per_page=100, fieldset="detailed"
             )
-
             invoices = []
             for doc in (response.data or []):
                 d = doc.to_dict()
@@ -435,18 +440,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     if query.lower() not in search_text:
                         continue
                 invoices.append(inv)
-
             return [TextContent(type="text", text=json.dumps(invoices, indent=2, ensure_ascii=False))]
 
         elif name == "get_invoice":
             doc_id = arguments["document_id"]
             response = issued_api.get_issued_document(
-                company_id=COMPANY_ID,
-                document_id=doc_id,
-                fieldset="detailed"
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
             )
             d = response.data.to_dict()
-
             items = []
             for i in d.get("items_list", []):
                 items.append({
@@ -457,7 +458,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "gross_price": i.get("gross_price", 0),
                     "vat": i.get("vat", {}).get("value") if i.get("vat") else None
                 })
-
             payments = []
             for p in d.get("payments_list", []):
                 payments.append({
@@ -466,7 +466,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     "status": str(p.get("status", "")).replace("IssuedDocumentStatus.", ""),
                     "paid_date": str(p.get("paid_date", "")) if p.get("paid_date") else None
                 })
-
             result = {
                 "id": d.get("id"),
                 "number": d.get("number"),
@@ -490,13 +489,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             clients = []
             for c in (response.data or []):
                 cd = c.to_dict()
-                client = {
-                    "id": cd.get("id"),
-                    "name": cd.get("name"),
-                    "vat": cd.get("vat_number"),
-                    "tax_code": cd.get("tax_code"),
-                    "email": cd.get("email")
-                }
+                client = {"id": cd.get("id"), "name": cd.get("name"),
+                          "vat": cd.get("vat_number"), "tax_code": cd.get("tax_code"),
+                          "email": cd.get("email")}
                 if query and query.lower() not in (client['name'] or '').lower():
                     continue
                 clients.append(client)
@@ -506,14 +501,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             response = companies_api.get_company_info(company_id=COMPANY_ID)
             d = response.data.to_dict()
             info = d.get("info", d)
-            result = {
-                "name": info.get("name"),
-                "vat": info.get("vat_number"),
-                "email": info.get("email"),
-                "address": info.get("address_street"),
-                "city": info.get("address_city"),
-                "province": info.get("address_province")
-            }
+            result = {"name": info.get("name"), "vat": info.get("vat_number"),
+                      "email": info.get("email"), "address": info.get("address_street"),
+                      "city": info.get("address_city"), "province": info.get("address_province")}
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "create_invoice":
@@ -524,11 +514,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
-                negate_prices=False
             )
             if error:
                 return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
-            result["message"] = f"Fattura #{result['number']} creata come bozza. Codice SDI: {result['ei_code']}. Usa send_to_sdi per inviarla."
+            result["message"] = f"Fattura #{result['number']} creata come bozza. SDI: {result['ei_code']}. Usa send_to_sdi per inviarla."
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "create_credit_note":
@@ -544,9 +533,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             if error:
                 return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
-            msg = f"Nota di credito #{result['number']} creata come bozza. Totale: {result['total']}."
+            msg = f"NDC #{result['number']} creata come bozza. Totale: {result['total']}."
             if result.get("linked_to_invoice"):
-                msg += f" Collegata alla fattura ID {result['linked_to_invoice']}."
+                msg += f" Collegata a fattura ID {result['linked_to_invoice']}."
             msg += " Usa send_to_sdi per inviarla."
             result["message"] = msg
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
@@ -559,11 +548,110 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
-                negate_prices=False
             )
             if error:
                 return [TextContent(type="text", text=json.dumps({"success": False, "error": error}, ensure_ascii=False))]
             result["message"] = f"Proforma #{result['number']} creata come bozza. Non inviabile allo SDI."
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "update_document":
+            doc_id = arguments["document_id"]
+
+            # Carica documento originale
+            orig_resp = issued_api.get_issued_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            orig = orig_resp.data.to_dict()
+
+            # Blocca se già inviato allo SDI
+            current_status = orig.get("ei_status")
+            if current_status and current_status not in [None, "not_sent"]:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": f"Impossibile modificare: documento già inviato allo SDI. Stato: {current_status}"
+                }, ensure_ascii=False))]
+
+            doc_type = orig.get("type", "invoice")
+            is_credit_note = (doc_type == "credit_note")
+
+            # Campi con fallback all'originale
+            date_str = arguments.get("date") or str(orig.get("date", datetime.now().strftime("%Y-%m-%d")))
+            visible_subject = arguments.get("visible_subject") if "visible_subject" in arguments else (orig.get("visible_subject") or "")
+
+            # Righe: usa nuove se fornite, altrimenti mantieni originali
+            if "items" in arguments:
+                items_list = build_items_list(arguments["items"], negate=is_credit_note)
+            else:
+                items_list = []
+                for i in orig.get("items_list", []):
+                    items_list.append({
+                        "name": i.get("name", ""),
+                        "description": i.get("description", ""),
+                        "qty": i.get("qty"),
+                        "net_price": i.get("net_price"),
+                        "vat": {"id": 0, "value": i.get("vat", {}).get("value", 22)}
+                    })
+
+            # Giorni pagamento: usa nuovo se fornito, altrimenti eredita dall'originale
+            if "payment_days" in arguments:
+                payment_days = arguments["payment_days"]
+            else:
+                orig_payments = orig.get("payments_list", [{}])
+                payment_days = orig_payments[0].get("payment_terms", {}).get("days", 30) if orig_payments else 30
+
+            invoice_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+            due_date = invoice_date + timedelta(days=payment_days)
+
+            total_gross = sum(
+                abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
+                for i in items_list
+            )
+            if is_credit_note:
+                total_gross = -total_gross
+
+            # Ricostruisci entity dall'anagrafica
+            client_id = orig.get("entity", {}).get("id")
+            client_data = get_client_by_id(client_id) if client_id else None
+            entity = build_entity_from_client(client_id, client_data) if (client_id and client_data) else orig.get("entity", {})
+
+            body_data = {
+                "type": doc_type,
+                "entity": entity,
+                "date": date_str[:10],
+                "visible_subject": visible_subject,
+                "items_list": items_list,
+                "payments_list": [{
+                    "amount": round(total_gross, 2),
+                    "due_date": due_date.strftime("%Y-%m-%d"),
+                    "status": "not_paid",
+                    "payment_terms": {"days": payment_days, "type": "standard"}
+                }]
+            }
+            if doc_type in ("invoice", "credit_note"):
+                body_data["e_invoice"] = True
+                body_data["ei_data"] = {"payment_method": "MP05"}
+            if orig.get("original_document"):
+                body_data["original_document"] = orig["original_document"]
+
+            response = issued_api.modify_issued_document(
+                company_id=COMPANY_ID,
+                document_id=doc_id,
+                modify_issued_document_request={"data": body_data}
+            )
+            d = response.data.to_dict()
+
+            result = {
+                "success": True,
+                "id": d.get("id"),
+                "number": d.get("number"),
+                "date": str(d.get("date", "")),
+                "due_date": due_date.strftime("%Y-%m-%d"),
+                "client": (client_data or {}).get("name", entity.get("name", "")),
+                "total": round(total_gross, 2),
+                "type": doc_type,
+                "status": "bozza",
+                "message": f"Documento #{d.get('number')} aggiornato con successo."
+            }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "duplicate_invoice":
@@ -583,16 +671,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             items_list = []
             for i in orig.get("items_list", []):
-                name = i.get("name", "")
-                desc = i.get("description", "")
+                iname = i.get("name", "")
+                idesc = i.get("description", "")
                 if desc_replace.get("old") and desc_replace.get("new"):
-                    name = name.replace(desc_replace["old"], desc_replace["new"])
-                    desc = desc.replace(desc_replace["old"], desc_replace["new"])
+                    iname = iname.replace(desc_replace["old"], desc_replace["new"])
+                    idesc = idesc.replace(desc_replace["old"], desc_replace["new"])
                 items_list.append({
-                    "name": name,
-                    "description": desc,
-                    "qty": i.get("qty"),
-                    "net_price": i.get("net_price"),
+                    "name": iname, "description": idesc,
+                    "qty": i.get("qty"), "net_price": i.get("net_price"),
                     "vat": {"id": 0, "value": i.get("vat", {}).get("value", 22)}
                 })
 
@@ -610,40 +696,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             due_date = invoice_date + timedelta(days=payment_days)
             total_gross = sum(i["qty"] * i["net_price"] * (1 + i["vat"]["value"] / 100) for i in items_list)
 
-            body = {
-                "data": {
-                    "type": "invoice",
-                    "e_invoice": True,
-                    "ei_data": {"payment_method": "MP05"},
-                    "entity": entity,
-                    "date": new_date_str,
-                    "visible_subject": visible_subject,
-                    "items_list": items_list,
-                    "payments_list": [{
-                        "amount": round(total_gross, 2),
-                        "due_date": due_date.strftime("%Y-%m-%d"),
-                        "status": "not_paid",
-                        "payment_terms": {"days": payment_days, "type": "standard"}
-                    }]
-                }
-            }
-
+            body = {"data": {
+                "type": "invoice", "e_invoice": True, "ei_data": {"payment_method": "MP05"},
+                "entity": entity, "date": new_date_str, "visible_subject": visible_subject,
+                "items_list": items_list,
+                "payments_list": [{"amount": round(total_gross, 2),
+                                   "due_date": due_date.strftime("%Y-%m-%d"),
+                                   "status": "not_paid",
+                                   "payment_terms": {"days": payment_days, "type": "standard"}}]
+            }}
             response = issued_api.create_issued_document(
                 company_id=COMPANY_ID, create_issued_document_request=body
             )
             d = response.data.to_dict()
             result = {
-                "success": True,
-                "id": d.get("id"),
-                "number": d.get("number"),
-                "date": str(d.get("date", "")),
-                "due_date": due_date.strftime("%Y-%m-%d"),
+                "success": True, "id": d.get("id"), "number": d.get("number"),
+                "date": str(d.get("date", "")), "due_date": due_date.strftime("%Y-%m-%d"),
                 "client": (client_data or {}).get("name", entity.get("name", "")),
-                "ei_code": entity.get("ei_code", "N/A"),
-                "total": round(total_gross, 2),
-                "source_invoice": orig.get("number"),
-                "status": "bozza",
-                "message": f"Fattura #{d.get('number')} creata come bozza (duplicata da #{orig.get('number')}). Scadenza: {due_date.strftime('%d/%m/%Y')}. Usa send_to_sdi per inviarla."
+                "ei_code": entity.get("ei_code", "N/A"), "total": round(total_gross, 2),
+                "source_invoice": orig.get("number"), "status": "bozza",
+                "message": f"Fattura #{d.get('number')} creata come bozza (duplicata da #{orig.get('number')}). Scadenza: {due_date.strftime('%d/%m/%Y')}."
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -654,17 +726,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             check_data = check.data.to_dict()
             current_status = check_data.get("ei_status")
-
             if current_status and current_status not in ["null", "not_sent", None]:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
-                    "error": f"Impossibile eliminare: documento già inviato allo SDI. Stato: {current_status}"
+                    "error": f"Impossibile eliminare: documento gi\u00e0 inviato allo SDI. Stato: {current_status}"
                 }, ensure_ascii=False))]
-
             issued_api.delete_issued_document(company_id=COMPANY_ID, document_id=doc_id)
             result = {
-                "success": True,
-                "document_id": doc_id,
+                "success": True, "document_id": doc_id,
                 "number": check_data.get("number"),
                 "client": check_data.get("entity", {}).get("name"),
                 "message": f"Documento #{check_data.get('number')} eliminato con successo."
@@ -678,21 +747,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             check_data = check.data.to_dict()
             current_status = check_data.get("ei_status")
-
             if current_status and current_status not in ["null", "rejected", None, "not_sent"]:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
-                    "error": f"Documento già inviato o in elaborazione. Stato: {current_status}"
+                    "error": f"Documento gi\u00e0 inviato o in elaborazione. Stato: {current_status}"
                 }, ensure_ascii=False))]
-
             einvoice_api.send_e_invoice(
-                company_id=COMPANY_ID,
-                document_id=doc_id,
+                company_id=COMPANY_ID, document_id=doc_id,
                 send_e_invoice_request={"data": {"withholding_tax_causal": None}}
             )
             result = {
-                "success": True,
-                "document_id": doc_id,
+                "success": True, "document_id": doc_id,
                 "number": check_data.get("number"),
                 "client": check_data.get("entity", {}).get("name"),
                 "message": f"Fattura #{check_data.get('number')} inviata allo SDI con successo!"
@@ -707,18 +772,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             d = response.data.to_dict()
             ei_status = d.get("ei_status")
             status_map = {
-                None: "Bozza (non inviata)",
-                "not_sent": "Bozza (non inviata)",
-                "pending": "In attesa di invio",
-                "sent": "Inviata, in attesa di risposta SDI",
-                "delivered": "Consegnata al destinatario",
-                "accepted": "Accettata",
-                "rejected": "Rifiutata",
-                "not_delivered": "Non consegnata (messa a disposizione)"
+                None: "Bozza (non inviata)", "not_sent": "Bozza (non inviata)",
+                "pending": "In attesa di invio", "sent": "Inviata, in attesa di risposta SDI",
+                "delivered": "Consegnata al destinatario", "accepted": "Accettata",
+                "rejected": "Rifiutata", "not_delivered": "Non consegnata (messa a disposizione)"
             }
             result = {
-                "id": d.get("id"),
-                "number": d.get("number"),
+                "id": d.get("id"), "number": d.get("number"),
                 "client": d.get("entity", {}).get("name"),
                 "ei_status": ei_status,
                 "ei_status_description": status_map.get(ei_status, ei_status),
@@ -733,37 +793,28 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             check_data = check.data.to_dict()
             recipient_email = arguments.get("recipient_email") or check_data.get("entity", {}).get("email", "")
-
             if not recipient_email:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False, "error": "Nessuna email specificata e cliente senza email in anagrafica"
                 }, ensure_ascii=False))]
             if not SENDER_EMAIL:
                 return [TextContent(type="text", text=json.dumps({
-                    "success": False, "error": "FIC_SENDER_EMAIL non configurato nel file .env"
+                    "success": False, "error": "FIC_SENDER_EMAIL non configurato nel .env"
                 }, ensure_ascii=False))]
-
-            email_data = {
-                "data": {
-                    "sender_email": SENDER_EMAIL,
-                    "recipient_email": recipient_email,
-                    "cc_email": "",
-                    "subject": arguments.get("subject") or f"Fattura n. {check_data.get('number')}",
-                    "body": arguments.get("body") or f"In allegato la fattura n. {check_data.get('number')}.\n\nCordiali saluti.",
-                    "include": {"document": True, "delivery_note": False, "attachment": False, "accompanying_invoice": False},
-                    "attach_pdf": True,
-                    "send_copy": False
-                }
-            }
+            email_data = {"data": {
+                "sender_email": SENDER_EMAIL, "recipient_email": recipient_email, "cc_email": "",
+                "subject": arguments.get("subject") or f"Fattura n. {check_data.get('number')}",
+                "body": arguments.get("body") or f"In allegato la fattura n. {check_data.get('number')}.\n\nCordiali saluti.",
+                "include": {"document": True, "delivery_note": False, "attachment": False, "accompanying_invoice": False},
+                "attach_pdf": True, "send_copy": False
+            }}
             issued_api.schedule_email(
                 company_id=COMPANY_ID, document_id=doc_id, schedule_email_request=email_data
             )
             result = {
-                "success": True,
-                "document_id": doc_id,
-                "number": check_data.get("number"),
-                "recipient": recipient_email,
-                "message": f"Email con fattura #{check_data.get('number')} inviata a {recipient_email}"
+                "success": True, "document_id": doc_id,
+                "number": check_data.get("number"), "recipient": recipient_email,
+                "message": f"Email con documento #{check_data.get('number')} inviata a {recipient_email}"
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
@@ -772,12 +823,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             month = arguments.get("month")
             doc_type = arguments.get("type", "expense")
             query = arguments.get("query")
-
             q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
             if month:
                 last_day = 31 if month in [1,3,5,7,8,10,12] else 30 if month in [4,6,9,11] else 29
                 q = f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'"
-
             response = received_api.list_received_documents(
                 company_id=COMPANY_ID, type=doc_type, q=q, per_page=100, fieldset="detailed"
             )
@@ -789,29 +838,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if query and query.lower() not in f"{supplier_name} {desc}".lower():
                     continue
                 docs.append({
-                    "id": d.get("id"),
-                    "number": d.get("number"),
-                    "date": str(d.get("date", "")),
-                    "supplier": supplier_name,
-                    "description": desc[:80],
-                    "total": d.get('amount_gross') or d.get('amount_net') or 0
+                    "id": d.get("id"), "number": d.get("number"),
+                    "date": str(d.get("date", "")), "supplier": supplier_name,
+                    "description": desc[:80], "total": d.get('amount_gross') or d.get('amount_net') or 0
                 })
             return [TextContent(type="text", text=json.dumps(docs, indent=2, ensure_ascii=False))]
 
         elif name == "get_situation":
             year = arguments.get("year", datetime.now().year)
             q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
-
             emesse_resp = issued_api.list_issued_documents(
                 company_id=COMPANY_ID, type="invoice", q=q, per_page=100, fieldset="detailed"
             )
             totale_fatturato = totale_incassato = 0
             fatture_non_pagate = []
-
             for doc in (emesse_resp.data or []):
                 d = doc.to_dict()
-                total = get_total_from_doc(d)
-                totale_fatturato += total
+                totale_fatturato += get_total_from_doc(d)
                 for p in d.get('payments_list', []):
                     status = str(p.get('status', '')).replace('IssuedDocumentStatus.', '')
                     if status == 'paid':
@@ -820,10 +863,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         fatture_non_pagate.append({
                             "number": d.get("number"),
                             "client": d.get('entity', {}).get('name', '') if d.get('entity') else '',
-                            "amount": p.get('amount', 0),
-                            "due_date": str(p.get('due_date', ''))
+                            "amount": p.get('amount', 0), "due_date": str(p.get('due_date', ''))
                         })
-
             ricevute_resp = received_api.list_received_documents(
                 company_id=COMPANY_ID, type="expense", q=q, per_page=100, fieldset="detailed"
             )
@@ -831,11 +872,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 d.to_dict().get('amount_gross') or d.to_dict().get('amount_net') or 0
                 for d in (ricevute_resp.data or [])
             )
-
             fatture_non_pagate.sort(key=lambda x: x.get('due_date', ''))
             result = {
-                "anno": year,
-                "fatturato_totale": round(totale_fatturato, 2),
+                "anno": year, "fatturato_totale": round(totale_fatturato, 2),
                 "incassato": round(totale_incassato, 2),
                 "da_incassare": round(totale_fatturato - totale_incassato, 2),
                 "costi_totali": round(totale_costi, 2),
@@ -847,12 +886,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "check_numeration":
             year = arguments.get("year", datetime.now().year)
             q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
-
             response = issued_api.list_issued_documents(
                 company_id=COMPANY_ID, type="invoice", q=q, per_page=100
             )
             docs = [d.to_dict() for d in (response.data or [])]
-
             total_pages = getattr(response, 'last_page', 1) or 1
             if total_pages > 1:
                 for page in range(2, total_pages + 1):
@@ -860,12 +897,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         company_id=COMPANY_ID, type="invoice", q=q, per_page=100, page=page
                     )
                     docs.extend([d.to_dict() for d in (page_resp.data or [])])
-
             if not docs:
                 return [TextContent(type="text", text=json.dumps({
                     "year": year, "status": "Nessuna fattura trovata per questo anno"
                 }, ensure_ascii=False))]
-
             numbers = sorted(set(
                 d.get("number") for d in docs
                 if d.get("number") is not None and d.get("number") > 0
@@ -882,14 +917,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         gaps.append({"type": "gap", "after": numbers[i], "before": numbers[i + 1],
                                      "missing": missing,
                                      "note": f"Mancano i numeri {missing} tra fattura {numbers[i]} e {numbers[i+1]}"})
-
             result = {
-                "year": year,
-                "total_invoices": len(numbers),
+                "year": year, "total_invoices": len(numbers),
                 "first_number": numbers[0] if numbers else None,
                 "last_number": numbers[-1] if numbers else None,
                 "continuous": len(gaps) == 0,
-                "status": "✓ Numerazione continua" if len(gaps) == 0 else f"⚠ Trovati {len(gaps)} problemi",
+                "status": "\u2713 Numerazione continua" if len(gaps) == 0 else f"\u26a0 Trovati {len(gaps)} problemi",
                 "gaps": gaps
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
