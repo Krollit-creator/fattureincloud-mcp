@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.6.1
+"""Fatture in Cloud MCP Server - v1.6.2
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
 
+Changelog v1.6.2:
+- FIX: NDC payment amount negativo (deve corrispondere ad amount_due negativo).
+  FIC richiede che payments_sum == amount_due, quindi per NDC il pagamento
+  deve essere negativo.
+
 Changelog v1.6.1:
-- FIX: payments_list amount sempre positivo (abs) anche per NDC.
-  FIC non accetta importi negativi nelle scadenze di pagamento.
+- FIX: tentativo abs() su payment — ERRATO per NDC, rollback.
 
 Changelog v1.6:
-- NEW: update_document - modifica parziale di qualsiasi documento bozza
-  (fattura, NDC, proforma): data, oggetto, righe, giorni pagamento.
+- NEW: update_document - modifica parziale di qualsiasi documento bozza.
 
 Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
@@ -124,7 +127,11 @@ def build_items_list(items_data, negate=False):
 
 def build_issued_document(doc_type, client_id, items_data, date_str, payment_days,
                           visible_subject, negate_prices=False, source_invoice_id=None):
-    """Costruisce e crea un documento emesso. Restituisce (result_dict, error_str)."""
+    """Costruisce e crea un documento emesso. Restituisce (result_dict, error_str).
+    
+    NOTA FIC: per NDC items hanno prezzi negativi E payments_list amount deve
+    essere negativo (deve corrispondere ad amount_due).
+    """
     client_data = get_client_by_id(client_id)
     if not client_data:
         return None, f"Cliente con ID {client_id} non trovato"
@@ -134,12 +141,14 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
 
     invoice_date = datetime.strptime(date_str, "%Y-%m-%d")
     due_date = invoice_date + timedelta(days=payment_days)
-    total_gross = sum(
+
+    # Calcola totale lordo sempre positivo, poi applica segno
+    total_abs = sum(
         abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
         for i in items_list
     )
-    # total nel result è negativo per NDC, ma payment amount sempre positivo
-    result_total = -total_gross if negate_prices else total_gross
+    # Per NDC: totale e payment negativi (FIC richiede payments_sum == amount_due)
+    payment_amount = -total_abs if negate_prices else total_abs
 
     body_data = {
         "type": doc_type,
@@ -148,7 +157,7 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "visible_subject": visible_subject,
         "items_list": items_list,
         "payments_list": [{
-            "amount": round(total_gross, 2),  # sempre positivo
+            "amount": round(payment_amount, 2),
             "due_date": due_date.strftime("%Y-%m-%d"),
             "status": "not_paid",
             "payment_terms": {"days": payment_days, "type": "standard"}
@@ -174,7 +183,7 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "due_date": due_date.strftime("%Y-%m-%d"),
         "client": client_data.get("name"),
         "ei_code": entity.get("ei_code", "N/A"),
-        "total": round(result_total, 2),
+        "total": round(payment_amount, 2),
         "type": doc_type,
         "status": "bozza",
     }
@@ -600,11 +609,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             invoice_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
             due_date = invoice_date + timedelta(days=payment_days)
 
-            total_gross = sum(
+            total_abs = sum(
                 abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
                 for i in items_list
             )
-            result_total = -total_gross if is_credit_note else total_gross
+            payment_amount = -total_abs if is_credit_note else total_abs
 
             client_id = orig.get("entity", {}).get("id")
             client_data = get_client_by_id(client_id) if client_id else None
@@ -617,7 +626,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "visible_subject": visible_subject,
                 "items_list": items_list,
                 "payments_list": [{
-                    "amount": round(total_gross, 2),  # sempre positivo
+                    "amount": round(payment_amount, 2),
                     "due_date": due_date.strftime("%Y-%m-%d"),
                     "status": "not_paid",
                     "payment_terms": {"days": payment_days, "type": "standard"}
@@ -643,7 +652,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "date": str(d.get("date", "")),
                 "due_date": due_date.strftime("%Y-%m-%d"),
                 "client": (client_data or {}).get("name", entity.get("name", "")),
-                "total": round(result_total, 2),
+                "total": round(payment_amount, 2),
                 "type": doc_type,
                 "status": "bozza",
                 "message": f"Documento #{d.get('number')} aggiornato con successo."
