@@ -1,13 +1,12 @@
 # Changelog
 
-## v1.7.0
-- NEW: `mark_payment_paid` — segna scadenza come pagata con data incasso
-- NEW: `mark_payment_unpaid` — rollback pagamento a non pagato
-- NEW: `convert_proforma_to_invoice` — converte proforma in fattura (elimina proforma di default, `keep_proforma=True` per mantenerla)
+## v1.8.0
+- NEW: `convert_proforma_to_invoice` — converte proforma in fattura elettronica (elimina proforma di default, `keep_proforma=True` per mantenerla)
 - NEW: `get_pdf_url` — restituisce URL PDF e link web del documento
 - NEW: `create_client` — crea nuovo cliente in anagrafica
 - NEW: `update_client` — aggiorna dati cliente esistente
 - FIX: `get_situation` — ora sottrae le NDC dal fatturato (fatturato_netto = fatture - NDC) e supporta filtro per cliente
+- REMOVED: `mark_payment_paid` / `mark_payment_unpaid` / `list_payment_accounts` — l'API FIC richiede un conto di saldo obbligatorio non recuperabile in modo affidabile via SDK. La marcatura pagamenti va eseguita direttamente dal pannello FIC.
 
 ## v1.6.4
 - FIX: `create_credit_note` — prezzi e payment positivi, FIC inverte internamente per type=credit_note

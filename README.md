@@ -12,23 +12,32 @@ Server MCP (Model Context Protocol) per integrare **Fatture in Cloud** con Claud
 
 Permette di gestire fatture elettroniche italiane tramite conversazione naturale.
 
-### ✨ Funzionalità (13 tool)
+### ✨ Funzionalità (20 tool)
 
 | Tool | Descrizione |
 |------|-------------|
-| `list_invoices` | Lista fatture emesse per anno/mese |
-| `get_invoice` | Dettaglio completo fattura |
+| `list_invoices` | Lista fatture/NDC/proforma emesse per anno/mese |
+| `get_invoice` | Dettaglio completo documento |
+| `get_pdf_url` | URL PDF e link web documento |
 | `list_clients` | Lista clienti con filtro |
 | `get_company_info` | Info azienda collegata |
+| `create_client` | 🆕 Crea nuovo cliente in anagrafica |
+| `update_client` | 🆕 Aggiorna dati cliente esistente |
 | `create_invoice` | Crea nuova fattura (bozza) con codice SDI automatico |
-| `duplicate_invoice` | Duplica fattura esistente con codice SDI aggiornato |
-| `delete_invoice` | Elimina fattura bozza (non inviata) |
+| `create_credit_note` | Crea nota di credito (bozza) |
+| `create_proforma` | Crea proforma (bozza, non inviabile SDI) |
+| `convert_proforma_to_invoice` | 🆕 Converte proforma in fattura elettronica |
+| `update_document` | Modifica parziale documento bozza |
+| `duplicate_invoice` | Duplica fattura con codice SDI aggiornato |
+| `delete_invoice` | Elimina documento bozza (non inviato) |
 | `send_to_sdi` | Invia fattura allo SDI |
-| `get_invoice_status` | Stato fattura elettronica |
+| `get_invoice_status` | Stato fattura elettronica SDI |
 | `send_email` | Invia copia cortesia via email |
 | `list_received_documents` | Fatture passive (fornitori) |
-| `get_situation` | Dashboard: fatturato, incassato, costi |
-| `check_numeration` | 🆕 Verifica continuità numerica fatture |
+| `get_situation` | Dashboard: fatturato netto, incassato, costi, margine |
+| `check_numeration` | Verifica continuità numerica fatture |
+
+> **Nota:** La marcatura dei pagamenti come "pagato" non è supportata. Usa il pannello web di Fatture in Cloud per questa operazione.
 
 ### 🚀 Installazione
 
@@ -109,6 +118,8 @@ Chiudi completamente Claude Desktop (Cmd+Q su Mac) e riaprilo.
 "Manda la copia cortesia via email"
 "Quali fatture devo ancora incassare?"
 "Verifica la numerazione delle fatture 2025"
+"Converti la proforma 12 in fattura"
+"Crea un nuovo cliente: Rossi SRL, P.IVA 01234567890"
 ```
 
 ### ⚠️ Note di sicurezza
@@ -139,23 +150,32 @@ MCP (Model Context Protocol) Server to integrate **Fatture in Cloud** with Claud
 
 Manage Italian electronic invoices through natural conversation.
 
-### ✨ Features (13 tools)
+### ✨ Features (20 tools)
 
 | Tool | Description |
 |------|-------------|
-| `list_invoices` | List issued invoices by year/month |
-| `get_invoice` | Full invoice details |
+| `list_invoices` | List invoices/credit notes/proforma by year/month |
+| `get_invoice` | Full document details |
+| `get_pdf_url` | PDF URL and web link for document |
 | `list_clients` | List clients with filter |
 | `get_company_info` | Connected company info |
+| `create_client` | 🆕 Create new client in registry |
+| `update_client` | 🆕 Update existing client data |
 | `create_invoice` | Create new invoice (draft) with automatic SDI code |
-| `duplicate_invoice` | Duplicate existing invoice with updated SDI code |
-| `delete_invoice` | Delete draft invoice (not yet sent) |
+| `create_credit_note` | Create credit note (draft) |
+| `create_proforma` | Create proforma (draft, not sendable to SDI) |
+| `convert_proforma_to_invoice` | 🆕 Convert proforma to electronic invoice |
+| `update_document` | Partial update of draft document |
+| `duplicate_invoice` | Duplicate invoice with updated SDI code |
+| `delete_invoice` | Delete draft document (not yet sent) |
 | `send_to_sdi` | Send invoice to SDI (Italian e-invoice system) |
-| `get_invoice_status` | E-invoice status |
+| `get_invoice_status` | E-invoice SDI status |
 | `send_email` | Send courtesy copy via email |
 | `list_received_documents` | Received invoices (suppliers) |
-| `get_situation` | Dashboard: revenue, collected, costs |
-| `check_numeration` | 🆕 Verify invoice numbering continuity |
+| `get_situation` | Dashboard: net revenue, collected, costs, margin |
+| `check_numeration` | Verify invoice numbering continuity |
+
+> **Note:** Marking payments as "paid" is not supported. Use the Fatture in Cloud web panel for this operation.
 
 ### 🚀 Installation
 
@@ -236,6 +256,8 @@ Fully quit Claude Desktop (Cmd+Q on Mac) and reopen it.
 "Send the courtesy copy via email"
 "Which invoices are still pending payment?"
 "Check invoice numbering for 2025"
+"Convert proforma 12 to invoice"
+"Create a new client: Rossi SRL, VAT 01234567890"
 ```
 
 ### ⚠️ Security notes
