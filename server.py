@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.6.4
+"""Fatture in Cloud MCP Server - v1.7.0
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
 
-Changelog v1.6.4:
-- FIX: NDC create con prezzi POSITIVI e payments_list positiva.
-  FIC inverte automaticamente i segni per type=credit_note.
-  Non serve negate_prices lato nostro.
+Changelog v1.7.0:
+- NEW: mark_payment_paid - segna scadenza come pagata con data incasso
+- NEW: mark_payment_unpaid - rollback pagamento a non pagato
+- NEW: convert_proforma_to_invoice - converte proforma in fattura (elimina proforma di default)
+- NEW: get_pdf_url - restituisce URL PDF e link web del documento
+- NEW: create_client - crea nuovo cliente in anagrafica
+- NEW: update_client - aggiorna dati cliente esistente
+- FIX: get_situation - ora sottrae le NDC dal fatturato e supporta filtro per cliente
 
 Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
@@ -130,8 +134,6 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         return None, f"Cliente con ID {client_id} non trovato"
 
     entity = build_entity_from_client(client_id, client_data)
-
-    # Per NDC: items sempre positivi, FIC inverte internamente
     items_list = build_items_list(items_data, negate=False)
 
     invoice_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -140,7 +142,6 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
         for i in items_list
     )
-    # Il totale restituito nel result è negativo per NDC (per chiarezza utente)
     result_total = -total_abs if negate_prices else total_abs
 
     body_data = {
@@ -150,7 +151,7 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "visible_subject": visible_subject,
         "items_list": items_list,
         "payments_list": [{
-            "amount": round(total_abs, 2),  # sempre positivo, FIC aggiusta per NDC
+            "amount": round(total_abs, 2),
             "due_date": due_date.strftime("%Y-%m-%d"),
             "status": "not_paid",
             "payment_terms": {"days": payment_days, "type": "standard"}
@@ -227,6 +228,17 @@ async def list_tools():
             }
         ),
         Tool(
+            name="get_pdf_url",
+            description="Restituisce URL PDF e link web di un documento (fattura, NDC, proforma)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID documento"}
+                },
+                "required": ["document_id"]
+            }
+        ),
+        Tool(
             name="list_clients",
             description="Lista clienti",
             inputSchema={
@@ -240,6 +252,50 @@ async def list_tools():
             name="get_company_info",
             description="Info azienda collegata",
             inputSchema={"type": "object", "properties": {}}
+        ),
+        Tool(
+            name="create_client",
+            description="Crea nuovo cliente in anagrafica",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Nome/Ragione sociale"},
+                    "vat_number": {"type": "string", "description": "Partita IVA (opzionale)"},
+                    "tax_code": {"type": "string", "description": "Codice fiscale (opzionale)"},
+                    "ei_code": {"type": "string", "description": "Codice destinatario SDI (opzionale)"},
+                    "certified_email": {"type": "string", "description": "PEC (opzionale)"},
+                    "email": {"type": "string", "description": "Email ordinaria (opzionale)"},
+                    "address_street": {"type": "string", "description": "Indirizzo (opzionale)"},
+                    "address_city": {"type": "string", "description": "Città (opzionale)"},
+                    "address_postal_code": {"type": "string", "description": "CAP (opzionale)"},
+                    "address_province": {"type": "string", "description": "Provincia (opzionale)"},
+                    "country": {"type": "string", "description": "Paese (default: Italia)"},
+                    "phone": {"type": "string", "description": "Telefono (opzionale)"}
+                },
+                "required": ["name"]
+            }
+        ),
+        Tool(
+            name="update_client",
+            description="Aggiorna dati cliente esistente. Passa solo i campi da modificare.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer", "description": "ID cliente"},
+                    "name": {"type": "string", "description": "Nome/Ragione sociale (opzionale)"},
+                    "vat_number": {"type": "string", "description": "Partita IVA (opzionale)"},
+                    "tax_code": {"type": "string", "description": "Codice fiscale (opzionale)"},
+                    "ei_code": {"type": "string", "description": "Codice destinatario SDI (opzionale)"},
+                    "certified_email": {"type": "string", "description": "PEC (opzionale)"},
+                    "email": {"type": "string", "description": "Email ordinaria (opzionale)"},
+                    "address_street": {"type": "string", "description": "Indirizzo (opzionale)"},
+                    "address_city": {"type": "string", "description": "Città (opzionale)"},
+                    "address_postal_code": {"type": "string", "description": "CAP (opzionale)"},
+                    "address_province": {"type": "string", "description": "Provincia (opzionale)"},
+                    "phone": {"type": "string", "description": "Telefono (opzionale)"}
+                },
+                "required": ["client_id"]
+            }
         ),
         Tool(
             name="create_invoice",
@@ -288,6 +344,19 @@ async def list_tools():
             }
         ),
         Tool(
+            name="convert_proforma_to_invoice",
+            description="Converte una proforma in fattura elettronica (bozza). Di default elimina la proforma originale. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID proforma da convertire"},
+                    "date": {"type": "string", "description": "Data fattura YYYY-MM-DD (default: data proforma)"},
+                    "keep_proforma": {"type": "boolean", "description": "Mantieni la proforma originale (default: false)"}
+                },
+                "required": ["document_id"]
+            }
+        ),
+        Tool(
             name="update_document",
             description="Modifica parziale di un documento BOZZA (fattura, NDC, proforma). Passa solo i campi da aggiornare: se non passi 'items', le righe restano invariate. Funziona solo su documenti non ancora inviati allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
             inputSchema={
@@ -302,6 +371,31 @@ async def list_tools():
                         "items": item_schema,
                         "description": "Nuove righe documento (opzionale). Per NDC, importi sempre positivi."
                     }
+                },
+                "required": ["document_id"]
+            }
+        ),
+        Tool(
+            name="mark_payment_paid",
+            description="Segna una scadenza di pagamento come pagata. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID documento"},
+                    "paid_date": {"type": "string", "description": "Data incasso YYYY-MM-DD (default: oggi)"},
+                    "payment_index": {"type": "integer", "description": "Indice scadenza (default: 0, prima scadenza)"}
+                },
+                "required": ["document_id"]
+            }
+        ),
+        Tool(
+            name="mark_payment_unpaid",
+            description="Segna una scadenza di pagamento come non pagata (rollback). IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "integer", "description": "ID documento"},
+                    "payment_index": {"type": "integer", "description": "Indice scadenza (default: 0, prima scadenza)"}
                 },
                 "required": ["document_id"]
             }
@@ -390,11 +484,12 @@ async def list_tools():
         ),
         Tool(
             name="get_situation",
-            description="Dashboard anno: fatturato totale, incassato, da incassare, costi, margine",
+            description="Dashboard anno: fatturato netto (fatture - NDC), incassato, da incassare, costi, margine. Supporta filtro per cliente.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "year": {"type": "integer", "description": "Anno (default: corrente)"}
+                    "year": {"type": "integer", "description": "Anno (default: corrente)"},
+                    "client_name": {"type": "string", "description": "Filtro per nome cliente (opzionale, ricerca parziale)"}
                 }
             }
         ),
@@ -489,6 +584,30 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+        elif name == "get_pdf_url":
+            doc_id = arguments["document_id"]
+            response = issued_api.get_issued_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            d = response.data.to_dict()
+            doc_type = d.get("type", "invoice")
+            number = d.get("number")
+            client = d.get("entity", {}).get("name") if d.get("entity") else ""
+            attachment_url = d.get("attachment_url") or d.get("url") or ""
+            # URL web FIC per visualizzare il documento
+            type_map = {"invoice": "issued", "credit_note": "issued", "proforma": "issued"}
+            web_url = f"https://secure.fattureincloud.it/issued-documents-view-{doc_id}"
+            result = {
+                "id": doc_id,
+                "number": number,
+                "type": doc_type,
+                "client": client,
+                "attachment_url": attachment_url,
+                "web_url": web_url,
+                "note": "attachment_url è il PDF diretto (se disponibile). web_url apre il documento nel browser FIC."
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
         elif name == "list_clients":
             query = arguments.get("query")
             response = clients_api.list_clients(company_id=COMPANY_ID, per_page=100)
@@ -510,6 +629,65 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = {"name": info.get("name"), "vat": info.get("vat_number"),
                       "email": info.get("email"), "address": info.get("address_street"),
                       "city": info.get("address_city"), "province": info.get("address_province")}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "create_client":
+            client_data = {
+                "name": arguments["name"],
+                "vat_number": arguments.get("vat_number", ""),
+                "tax_code": arguments.get("tax_code", ""),
+                "ei_code": arguments.get("ei_code", ""),
+                "certified_email": arguments.get("certified_email", ""),
+                "email": arguments.get("email", ""),
+                "address_street": arguments.get("address_street", ""),
+                "address_city": arguments.get("address_city", ""),
+                "address_postal_code": arguments.get("address_postal_code", ""),
+                "address_province": arguments.get("address_province", ""),
+                "country": arguments.get("country", "Italia"),
+                "phone": arguments.get("phone", ""),
+            }
+            response = clients_api.create_client(
+                company_id=COMPANY_ID,
+                create_client_request={"data": client_data}
+            )
+            d = response.data.to_dict()
+            result = {
+                "success": True,
+                "id": d.get("id"),
+                "name": d.get("name"),
+                "vat_number": d.get("vat_number"),
+                "message": f"Cliente '{d.get('name')}' creato con ID {d.get('id')}."
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "update_client":
+            client_id = arguments["client_id"]
+            # Carica dati originali
+            orig = get_client_by_id(client_id)
+            if not orig:
+                return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Cliente {client_id} non trovato"}, ensure_ascii=False))]
+            # Merge: aggiorna solo i campi passati
+            fields = ["name", "vat_number", "tax_code", "ei_code", "certified_email",
+                      "email", "address_street", "address_city", "address_postal_code",
+                      "address_province", "phone"]
+            client_data = {}
+            for f in fields:
+                if f in arguments:
+                    client_data[f] = arguments[f]
+                elif orig.get(f) is not None:
+                    client_data[f] = orig[f]
+            response = clients_api.modify_client(
+                company_id=COMPANY_ID,
+                client_id=client_id,
+                modify_client_request={"data": client_data}
+            )
+            d = response.data.to_dict()
+            result = {
+                "success": True,
+                "id": d.get("id"),
+                "name": d.get("name"),
+                "message": f"Cliente '{d.get('name')}' aggiornato con successo."
+            }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "create_invoice":
@@ -534,7 +712,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
-                negate_prices=True,  # solo per result_total nel ritorno, non per API
+                negate_prices=True,
                 source_invoice_id=arguments.get("source_invoice_id")
             )
             if error:
@@ -560,6 +738,191 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result["message"] = f"Proforma #{result['number']} creata come bozza. Non inviabile allo SDI."
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+        elif name == "convert_proforma_to_invoice":
+            doc_id = arguments["document_id"]
+            keep_proforma = arguments.get("keep_proforma", False)
+
+            # Carica proforma originale
+            orig_resp = issued_api.get_issued_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            orig = orig_resp.data.to_dict()
+
+            if orig.get("type") != "proforma":
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": f"Il documento {doc_id} non è una proforma (tipo: {orig.get('type')})"
+                }, ensure_ascii=False))]
+
+            # Ricava dati dalla proforma
+            client_id = orig.get("entity", {}).get("id")
+            client_data = get_client_by_id(client_id) if client_id else None
+            entity = build_entity_from_client(client_id, client_data) if (client_id and client_data) else orig.get("entity", {})
+
+            date_str = arguments.get("date") or str(orig.get("date", datetime.now().strftime("%Y-%m-%d")))
+
+            # Eredita items dalla proforma (prezzi positivi)
+            items_list = []
+            for i in orig.get("items_list", []):
+                items_list.append({
+                    "name": i.get("name", ""),
+                    "description": i.get("description", ""),
+                    "qty": i.get("qty"),
+                    "net_price": abs(i.get("net_price", 0)),
+                    "vat": {"id": 0, "value": i.get("vat", {}).get("value", 22)}
+                })
+
+            orig_payments = orig.get("payments_list", [{}])
+            payment_days = orig_payments[0].get("payment_terms", {}).get("days", 30) if orig_payments else 30
+
+            invoice_date = datetime.strptime(date_str[:10], "%Y-%m-%d")
+            due_date = invoice_date + timedelta(days=payment_days)
+            total_gross = sum(i["qty"] * i["net_price"] * (1 + i["vat"]["value"] / 100) for i in items_list)
+
+            body = {"data": {
+                "type": "invoice",
+                "e_invoice": True,
+                "ei_data": {"payment_method": "MP05"},
+                "entity": entity,
+                "date": date_str[:10],
+                "visible_subject": orig.get("visible_subject", ""),
+                "items_list": items_list,
+                "payments_list": [{
+                    "amount": round(total_gross, 2),
+                    "due_date": due_date.strftime("%Y-%m-%d"),
+                    "status": "not_paid",
+                    "payment_terms": {"days": payment_days, "type": "standard"}
+                }]
+            }}
+
+            response = issued_api.create_issued_document(
+                company_id=COMPANY_ID, create_issued_document_request=body
+            )
+            d = response.data.to_dict()
+
+            # Elimina proforma se richiesto (default)
+            if not keep_proforma:
+                issued_api.delete_issued_document(company_id=COMPANY_ID, document_id=doc_id)
+
+            result = {
+                "success": True,
+                "invoice_id": d.get("id"),
+                "invoice_number": d.get("number"),
+                "date": date_str[:10],
+                "due_date": due_date.strftime("%Y-%m-%d"),
+                "client": (client_data or {}).get("name", entity.get("name", "")),
+                "ei_code": entity.get("ei_code", "N/A"),
+                "total": round(total_gross, 2),
+                "proforma_deleted": not keep_proforma,
+                "message": f"Fattura #{d.get('number')} creata da proforma #{orig.get('number')}. {'Proforma eliminata.' if not keep_proforma else 'Proforma mantenuta.'} Usa send_to_sdi per inviarla."
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "mark_payment_paid":
+            doc_id = arguments["document_id"]
+            payment_index = arguments.get("payment_index", 0)
+            paid_date = arguments.get("paid_date", datetime.now().strftime("%Y-%m-%d"))
+
+            orig_resp = issued_api.get_issued_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            orig = orig_resp.data.to_dict()
+
+            payments = orig.get("payments_list", [])
+            if payment_index >= len(payments):
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": f"Scadenza {payment_index} non trovata. Il documento ha {len(payments)} scadenze (indici 0-{len(payments)-1})."
+                }, ensure_ascii=False))]
+
+            # Aggiorna solo la scadenza richiesta
+            new_payments = []
+            for i, p in enumerate(payments):
+                p_copy = dict(p)
+                # Pulisce eventuali oggetti annidati non serializzabili
+                if i == payment_index:
+                    p_copy["status"] = "paid"
+                    p_copy["paid_date"] = paid_date
+                new_payments.append(p_copy)
+
+            body_data = {
+                "type": orig.get("type"),
+                "entity": orig.get("entity"),
+                "date": str(orig.get("date", "")),
+                "visible_subject": orig.get("visible_subject", ""),
+                "items_list": orig.get("items_list", []),
+                "payments_list": new_payments,
+            }
+            if orig.get("type") in ("invoice", "credit_note"):
+                body_data["e_invoice"] = True
+                body_data["ei_data"] = orig.get("ei_data") or {"payment_method": "MP05"}
+
+            issued_api.modify_issued_document(
+                company_id=COMPANY_ID,
+                document_id=doc_id,
+                modify_issued_document_request={"data": body_data}
+            )
+            result = {
+                "success": True,
+                "document_id": doc_id,
+                "number": orig.get("number"),
+                "payment_index": payment_index,
+                "amount": payments[payment_index].get("amount"),
+                "paid_date": paid_date,
+                "message": f"Scadenza #{payment_index} di fattura #{orig.get('number')} segnata come pagata in data {paid_date}."
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "mark_payment_unpaid":
+            doc_id = arguments["document_id"]
+            payment_index = arguments.get("payment_index", 0)
+
+            orig_resp = issued_api.get_issued_document(
+                company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
+            )
+            orig = orig_resp.data.to_dict()
+
+            payments = orig.get("payments_list", [])
+            if payment_index >= len(payments):
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": f"Scadenza {payment_index} non trovata. Il documento ha {len(payments)} scadenze."
+                }, ensure_ascii=False))]
+
+            new_payments = []
+            for i, p in enumerate(payments):
+                p_copy = dict(p)
+                if i == payment_index:
+                    p_copy["status"] = "not_paid"
+                    p_copy.pop("paid_date", None)
+                new_payments.append(p_copy)
+
+            body_data = {
+                "type": orig.get("type"),
+                "entity": orig.get("entity"),
+                "date": str(orig.get("date", "")),
+                "visible_subject": orig.get("visible_subject", ""),
+                "items_list": orig.get("items_list", []),
+                "payments_list": new_payments,
+            }
+            if orig.get("type") in ("invoice", "credit_note"):
+                body_data["e_invoice"] = True
+                body_data["ei_data"] = orig.get("ei_data") or {"payment_method": "MP05"}
+
+            issued_api.modify_issued_document(
+                company_id=COMPANY_ID,
+                document_id=doc_id,
+                modify_issued_document_request={"data": body_data}
+            )
+            result = {
+                "success": True,
+                "document_id": doc_id,
+                "number": orig.get("number"),
+                "payment_index": payment_index,
+                "message": f"Scadenza #{payment_index} di fattura #{orig.get('number')} reimpostata come non pagata."
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
         elif name == "update_document":
             doc_id = arguments["document_id"]
 
@@ -582,7 +945,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             visible_subject = arguments.get("visible_subject") if "visible_subject" in arguments else (orig.get("visible_subject") or "")
 
             if "items" in arguments:
-                # Per NDC: sempre positivi, FIC gestisce internamente
                 items_list = build_items_list(arguments["items"], negate=False)
             else:
                 items_list = []
@@ -591,7 +953,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "name": i.get("name", ""),
                         "description": i.get("description", ""),
                         "qty": i.get("qty"),
-                        "net_price": abs(i.get("net_price", 0)),  # forza positivo
+                        "net_price": abs(i.get("net_price", 0)),
                         "vat": {"id": 0, "value": i.get("vat", {}).get("value", 22)}
                     })
 
@@ -620,7 +982,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "visible_subject": visible_subject,
                 "items_list": items_list,
                 "payments_list": [{
-                    "amount": round(total_abs, 2),  # sempre positivo
+                    "amount": round(total_abs, 2),
                     "due_date": due_date.strftime("%Y-%m-%d"),
                     "status": "not_paid",
                     "payment_terms": {"days": payment_days, "type": "standard"}
@@ -845,14 +1207,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "get_situation":
             year = arguments.get("year", datetime.now().year)
+            client_filter = (arguments.get("client_name") or "").lower().strip()
             q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
+
+            # Fatture emesse
             emesse_resp = issued_api.list_issued_documents(
                 company_id=COMPANY_ID, type="invoice", q=q, per_page=100, fieldset="detailed"
             )
-            totale_fatturato = totale_incassato = 0
+            # NDC emesse
+            ndc_resp = issued_api.list_issued_documents(
+                company_id=COMPANY_ID, type="credit_note", q=q, per_page=100, fieldset="detailed"
+            )
+
+            totale_fatturato = totale_incassato = totale_ndc = 0
             fatture_non_pagate = []
+
             for doc in (emesse_resp.data or []):
                 d = doc.to_dict()
+                client_name = d.get('entity', {}).get('name', '') if d.get('entity') else ''
+                if client_filter and client_filter not in client_name.lower():
+                    continue
                 totale_fatturato += get_total_from_doc(d)
                 for p in d.get('payments_list', []):
                     status = str(p.get('status', '')).replace('IssuedDocumentStatus.', '')
@@ -861,23 +1235,44 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     elif status == 'not_paid':
                         fatture_non_pagate.append({
                             "number": d.get("number"),
-                            "client": d.get('entity', {}).get('name', '') if d.get('entity') else '',
-                            "amount": p.get('amount', 0), "due_date": str(p.get('due_date', ''))
+                            "client": client_name,
+                            "amount": p.get('amount', 0),
+                            "due_date": str(p.get('due_date', ''))
                         })
-            ricevute_resp = received_api.list_received_documents(
-                company_id=COMPANY_ID, type="expense", q=q, per_page=100, fieldset="detailed"
-            )
-            totale_costi = sum(
-                d.to_dict().get('amount_gross') or d.to_dict().get('amount_net') or 0
-                for d in (ricevute_resp.data or [])
-            )
+
+            for doc in (ndc_resp.data or []):
+                d = doc.to_dict()
+                client_name = d.get('entity', {}).get('name', '') if d.get('entity') else ''
+                if client_filter and client_filter not in client_name.lower():
+                    continue
+                # Le NDC hanno totale negativo in FIC (payments negativi)
+                totale_ndc += abs(get_total_from_doc(d))
+
+            # Fatturato netto = fatture - NDC
+            fatturato_netto = totale_fatturato - totale_ndc
+
+            # Costi (solo se no filtro cliente)
+            totale_costi = 0
+            if not client_filter:
+                ricevute_resp = received_api.list_received_documents(
+                    company_id=COMPANY_ID, type="expense", q=q, per_page=100, fieldset="detailed"
+                )
+                totale_costi = sum(
+                    d.to_dict().get('amount_gross') or d.to_dict().get('amount_net') or 0
+                    for d in (ricevute_resp.data or [])
+                )
+
             fatture_non_pagate.sort(key=lambda x: x.get('due_date', ''))
             result = {
-                "anno": year, "fatturato_totale": round(totale_fatturato, 2),
+                "anno": year,
+                "filtro_cliente": client_filter or None,
+                "fatturato_lordo": round(totale_fatturato, 2),
+                "note_credito": round(totale_ndc, 2),
+                "fatturato_netto": round(fatturato_netto, 2),
                 "incassato": round(totale_incassato, 2),
-                "da_incassare": round(totale_fatturato - totale_incassato, 2),
-                "costi_totali": round(totale_costi, 2),
-                "margine_lordo": round(totale_fatturato - totale_costi, 2),
+                "da_incassare": round(fatturato_netto - totale_incassato, 2),
+                "costi_totali": round(totale_costi, 2) if not client_filter else "N/A (filtro cliente attivo)",
+                "margine_lordo": round(fatturato_netto - totale_costi, 2) if not client_filter else "N/A",
                 "prossime_scadenze": fatture_non_pagate[:10]
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
