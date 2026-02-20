@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.6.3
+"""Fatture in Cloud MCP Server - v1.6.4
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
 
-Changelog v1.6.3:
-- FIX: NDC create senza payments_list. FIC non accetta payment negativi
-  né positivi che non corrispondono ad amount_due negativo. Soluzione:
-  omettere payments_list per credit_note, FIC la calcola da solo.
+Changelog v1.6.4:
+- FIX: NDC create con prezzi POSITIVI e payments_list positiva.
+  FIC inverte automaticamente i segni per type=credit_note.
+  Non serve negate_prices lato nostro.
 
 Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
@@ -122,14 +122,17 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
                           visible_subject, negate_prices=False, source_invoice_id=None):
     """Costruisce e crea un documento emesso. Restituisce (result_dict, error_str).
 
-    NOTA: per credit_note non si manda payments_list — FIC la calcola da solo.
+    NOTA FIC credit_note: inviare prezzi e payments POSITIVI.
+    FIC gestisce internamente l'inversione di segno per le NDC.
     """
     client_data = get_client_by_id(client_id)
     if not client_data:
         return None, f"Cliente con ID {client_id} non trovato"
 
     entity = build_entity_from_client(client_id, client_data)
-    items_list = build_items_list(items_data, negate=negate_prices)
+
+    # Per NDC: items sempre positivi, FIC inverte internamente
+    items_list = build_items_list(items_data, negate=False)
 
     invoice_date = datetime.strptime(date_str, "%Y-%m-%d")
     due_date = invoice_date + timedelta(days=payment_days)
@@ -137,6 +140,7 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
         for i in items_list
     )
+    # Il totale restituito nel result è negativo per NDC (per chiarezza utente)
     result_total = -total_abs if negate_prices else total_abs
 
     body_data = {
@@ -145,17 +149,13 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "date": date_str,
         "visible_subject": visible_subject,
         "items_list": items_list,
-    }
-
-    # Per NDC: FIC non accetta payments_list (né positiva né negativa)
-    # La calcola automaticamente dagli items
-    if doc_type != "credit_note":
-        body_data["payments_list"] = [{
-            "amount": round(total_abs, 2),
+        "payments_list": [{
+            "amount": round(total_abs, 2),  # sempre positivo, FIC aggiusta per NDC
             "due_date": due_date.strftime("%Y-%m-%d"),
             "status": "not_paid",
             "payment_terms": {"days": payment_days, "type": "standard"}
         }]
+    }
 
     if doc_type in ("invoice", "credit_note"):
         body_data["e_invoice"] = True
@@ -534,7 +534,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 date_str=arguments.get("date", datetime.now().strftime("%Y-%m-%d")),
                 payment_days=arguments.get("payment_days", 30),
                 visible_subject=arguments.get("visible_subject", ""),
-                negate_prices=True,
+                negate_prices=True,  # solo per result_total nel ritorno, non per API
                 source_invoice_id=arguments.get("source_invoice_id")
             )
             if error:
@@ -582,7 +582,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             visible_subject = arguments.get("visible_subject") if "visible_subject" in arguments else (orig.get("visible_subject") or "")
 
             if "items" in arguments:
-                items_list = build_items_list(arguments["items"], negate=is_credit_note)
+                # Per NDC: sempre positivi, FIC gestisce internamente
+                items_list = build_items_list(arguments["items"], negate=False)
             else:
                 items_list = []
                 for i in orig.get("items_list", []):
@@ -590,7 +591,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "name": i.get("name", ""),
                         "description": i.get("description", ""),
                         "qty": i.get("qty"),
-                        "net_price": i.get("net_price"),
+                        "net_price": abs(i.get("net_price", 0)),  # forza positivo
                         "vat": {"id": 0, "value": i.get("vat", {}).get("value", 22)}
                     })
 
@@ -618,15 +619,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "date": date_str[:10],
                 "visible_subject": visible_subject,
                 "items_list": items_list,
-            }
-            # Per NDC non mandare payments_list
-            if doc_type != "credit_note":
-                body_data["payments_list"] = [{
-                    "amount": round(total_abs, 2),
+                "payments_list": [{
+                    "amount": round(total_abs, 2),  # sempre positivo
                     "due_date": due_date.strftime("%Y-%m-%d"),
                     "status": "not_paid",
                     "payment_terms": {"days": payment_days, "type": "standard"}
                 }]
+            }
             if doc_type in ("invoice", "credit_note"):
                 body_data["e_invoice"] = True
                 body_data["ei_data"] = {"payment_method": "MP05"}
