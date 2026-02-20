@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.3
+"""Fatture in Cloud MCP Server - v1.4
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
+
+Changelog v1.4:
+- NEW: list_invoices ora accetta parametro 'type': invoice (default), credit_note, proforma
+  Permette di elencare note di credito e proforma oltre alle fatture standard
 
 Changelog v1.3:
 - FIX: create_invoice ora include ei_code (codice univoco SDI) dall'anagrafica cliente
@@ -127,13 +131,14 @@ async def list_tools():
     return [
         Tool(
             name="list_invoices",
-            description="Lista fatture emesse. Parametri: year (int), month (int opzionale), query (str opzionale)",
+            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma - default: invoice)",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "year": {"type": "integer", "description": "Anno (es. 2024)"},
                     "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
-                    "query": {"type": "string", "description": "Filtro testuale (opzionale)"}
+                    "query": {"type": "string", "description": "Filtro testuale (opzionale)"},
+                    "type": {"type": "string", "description": "Tipo documento: invoice (default), credit_note, proforma"}
                 },
                 "required": ["year"]
             }
@@ -306,6 +311,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             year = arguments.get("year", 2024)
             month = arguments.get("month")
             query = arguments.get("query")
+            doc_type = arguments.get("type", "invoice")
             
             q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
             if month:
@@ -314,7 +320,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             
             response = issued_api.list_issued_documents(
                 company_id=COMPANY_ID,
-                type="invoice",
+                type=doc_type,
                 q=q,
                 per_page=100,
                 fieldset="detailed"
