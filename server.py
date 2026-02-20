@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.6
+"""Fatture in Cloud MCP Server - v1.6.1
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
 
+Changelog v1.6.1:
+- FIX: payments_list amount sempre positivo (abs) anche per NDC.
+  FIC non accetta importi negativi nelle scadenze di pagamento.
+
 Changelog v1.6:
 - NEW: update_document - modifica parziale di qualsiasi documento bozza
   (fattura, NDC, proforma): data, oggetto, righe, giorni pagamento.
-  Carica l'originale e applica solo i campi forniti (patch parziale).
 
 Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
@@ -135,8 +138,8 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
         for i in items_list
     )
-    if negate_prices:
-        total_gross = -total_gross
+    # total nel result è negativo per NDC, ma payment amount sempre positivo
+    result_total = -total_gross if negate_prices else total_gross
 
     body_data = {
         "type": doc_type,
@@ -145,7 +148,7 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "visible_subject": visible_subject,
         "items_list": items_list,
         "payments_list": [{
-            "amount": round(total_gross, 2),
+            "amount": round(total_gross, 2),  # sempre positivo
             "due_date": due_date.strftime("%Y-%m-%d"),
             "status": "not_paid",
             "payment_terms": {"days": payment_days, "type": "standard"}
@@ -171,7 +174,7 @@ def build_issued_document(doc_type, client_id, items_data, date_str, payment_day
         "due_date": due_date.strftime("%Y-%m-%d"),
         "client": client_data.get("name"),
         "ei_code": entity.get("ei_code", "N/A"),
-        "total": round(total_gross, 2),
+        "total": round(result_total, 2),
         "type": doc_type,
         "status": "bozza",
     }
@@ -187,7 +190,7 @@ async def list_tools():
         "properties": {
             "name": {"type": "string", "description": "Nome prodotto/servizio"},
             "description": {"type": "string", "description": "Descrizione estesa"},
-            "qty": {"type": "number", "description": "Quantit\u00e0"},
+            "qty": {"type": "number", "description": "Quantità"},
             "net_price": {"type": "number", "description": "Prezzo netto unitario (sempre positivo)"},
             "vat_rate": {"type": "number", "description": "Aliquota IVA (es. 22)"}
         },
@@ -197,7 +200,7 @@ async def list_tools():
     return [
         Tool(
             name="list_invoices",
-            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma \u2014 default: invoice)",
+            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma — default: invoice)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -394,7 +397,7 @@ async def list_tools():
         ),
         Tool(
             name="check_numeration",
-            description="Verifica continuit\u00e0 numerica delle fatture emesse per un dato anno.",
+            description="Verifica continuità numerica delle fatture emesse per un dato anno.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -557,13 +560,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "update_document":
             doc_id = arguments["document_id"]
 
-            # Carica documento originale
             orig_resp = issued_api.get_issued_document(
                 company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
             )
             orig = orig_resp.data.to_dict()
 
-            # Blocca se già inviato allo SDI
             current_status = orig.get("ei_status")
             if current_status and current_status not in [None, "not_sent"]:
                 return [TextContent(type="text", text=json.dumps({
@@ -574,11 +575,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             doc_type = orig.get("type", "invoice")
             is_credit_note = (doc_type == "credit_note")
 
-            # Campi con fallback all'originale
             date_str = arguments.get("date") or str(orig.get("date", datetime.now().strftime("%Y-%m-%d")))
             visible_subject = arguments.get("visible_subject") if "visible_subject" in arguments else (orig.get("visible_subject") or "")
 
-            # Righe: usa nuove se fornite, altrimenti mantieni originali
             if "items" in arguments:
                 items_list = build_items_list(arguments["items"], negate=is_credit_note)
             else:
@@ -592,7 +591,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         "vat": {"id": 0, "value": i.get("vat", {}).get("value", 22)}
                     })
 
-            # Giorni pagamento: usa nuovo se fornito, altrimenti eredita dall'originale
             if "payment_days" in arguments:
                 payment_days = arguments["payment_days"]
             else:
@@ -606,10 +604,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 abs(i["qty"] * i["net_price"]) * (1 + i["vat"]["value"] / 100)
                 for i in items_list
             )
-            if is_credit_note:
-                total_gross = -total_gross
+            result_total = -total_gross if is_credit_note else total_gross
 
-            # Ricostruisci entity dall'anagrafica
             client_id = orig.get("entity", {}).get("id")
             client_data = get_client_by_id(client_id) if client_id else None
             entity = build_entity_from_client(client_id, client_data) if (client_id and client_data) else orig.get("entity", {})
@@ -621,7 +617,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "visible_subject": visible_subject,
                 "items_list": items_list,
                 "payments_list": [{
-                    "amount": round(total_gross, 2),
+                    "amount": round(total_gross, 2),  # sempre positivo
                     "due_date": due_date.strftime("%Y-%m-%d"),
                     "status": "not_paid",
                     "payment_terms": {"days": payment_days, "type": "standard"}
@@ -647,7 +643,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "date": str(d.get("date", "")),
                 "due_date": due_date.strftime("%Y-%m-%d"),
                 "client": (client_data or {}).get("name", entity.get("name", "")),
-                "total": round(total_gross, 2),
+                "total": round(result_total, 2),
                 "type": doc_type,
                 "status": "bozza",
                 "message": f"Documento #{d.get('number')} aggiornato con successo."
@@ -729,7 +725,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if current_status and current_status not in ["null", "not_sent", None]:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
-                    "error": f"Impossibile eliminare: documento gi\u00e0 inviato allo SDI. Stato: {current_status}"
+                    "error": f"Impossibile eliminare: documento già inviato allo SDI. Stato: {current_status}"
                 }, ensure_ascii=False))]
             issued_api.delete_issued_document(company_id=COMPANY_ID, document_id=doc_id)
             result = {
@@ -750,7 +746,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if current_status and current_status not in ["null", "rejected", None, "not_sent"]:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
-                    "error": f"Documento gi\u00e0 inviato o in elaborazione. Stato: {current_status}"
+                    "error": f"Documento già inviato o in elaborazione. Stato: {current_status}"
                 }, ensure_ascii=False))]
             einvoice_api.send_e_invoice(
                 company_id=COMPANY_ID, document_id=doc_id,
@@ -922,7 +918,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "first_number": numbers[0] if numbers else None,
                 "last_number": numbers[-1] if numbers else None,
                 "continuous": len(gaps) == 0,
-                "status": "\u2713 Numerazione continua" if len(gaps) == 0 else f"\u26a0 Trovati {len(gaps)} problemi",
+                "status": "✓ Numerazione continua" if len(gaps) == 0 else f"⚠ Trovati {len(gaps)} problemi",
                 "gaps": gaps
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
