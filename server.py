@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Fatture in Cloud MCP Server - v1.7.1
+"""Fatture in Cloud MCP Server - v1.7.2
 
 MCP Server per integrare Fatture in Cloud con Claude AI.
 Permette di gestire fatture elettroniche italiane tramite conversazione.
 
-Changelog v1.7.1:
-- FIX: mark_payment_paid ora include payment_account (conto di saldo) obbligatorio per FIC.
-  Auto-seleziona il primo conto disponibile se non specificato.
-- NEW: list_payment_accounts - lista conti bancari/cassa configurati in FIC
-- NEW: payment_account_id opzionale in mark_payment_paid
+Changelog v1.7.2:
+- FIX: rimosso PaymentAccountsApi (non presente nell'SDK installato),
+  sostituito con chiamata REST diretta per list_payment_accounts e auto-fetch conto
 
 Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
@@ -17,6 +15,7 @@ License: MIT
 import json
 import os
 import traceback
+import urllib.request
 from datetime import datetime, timedelta
 
 import fattureincloud_python_sdk as fic
@@ -25,7 +24,6 @@ from fattureincloud_python_sdk.api.issued_e_invoices_api import IssuedEInvoicesA
 from fattureincloud_python_sdk.api.received_documents_api import ReceivedDocumentsApi
 from fattureincloud_python_sdk.api.clients_api import ClientsApi
 from fattureincloud_python_sdk.api.companies_api import CompaniesApi
-from fattureincloud_python_sdk.api.payment_accounts_api import PaymentAccountsApi
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -44,9 +42,33 @@ einvoice_api = IssuedEInvoicesApi(api_client)
 received_api = ReceivedDocumentsApi(api_client)
 clients_api = ClientsApi(api_client)
 companies_api = CompaniesApi(api_client)
-payment_accounts_api = PaymentAccountsApi(api_client)
 
 app = Server("fattureincloud")
+
+
+def fic_get(endpoint):
+    """Chiamata GET diretta alle API FIC. endpoint es: '/payment_accounts'"""
+    url = f"https://api.fattureincloud.it/v2/c/{COMPANY_ID}{endpoint}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode())
+
+
+def get_payment_accounts():
+    """Restituisce lista conti di pagamento via REST diretto."""
+    try:
+        data = fic_get("/payment_accounts")
+        return data.get("data", [])
+    except Exception:
+        return []
+
+
+def get_default_payment_account_id():
+    """Restituisce l'ID del primo conto di pagamento disponibile."""
+    accounts = get_payment_accounts()
+    if accounts:
+        return accounts[0].get("id")
+    return None
 
 
 def get_total_from_doc(d):
@@ -61,18 +83,6 @@ def get_client_by_id(client_id):
     try:
         response = clients_api.get_client(company_id=COMPANY_ID, client_id=client_id)
         return response.data.to_dict()
-    except:
-        return None
-
-
-def get_default_payment_account_id():
-    """Restituisce l'ID del primo conto di pagamento disponibile."""
-    try:
-        response = payment_accounts_api.list_payment_accounts(company_id=COMPANY_ID)
-        accounts = response.data or []
-        if accounts:
-            return accounts[0].to_dict().get("id")
-        return None
     except:
         return None
 
@@ -135,11 +145,6 @@ def build_items_list(items_data, negate=False):
 
 def build_issued_document(doc_type, client_id, items_data, date_str, payment_days,
                           visible_subject, negate_prices=False, source_invoice_id=None):
-    """Costruisce e crea un documento emesso. Restituisce (result_dict, error_str).
-
-    NOTA FIC credit_note: inviare prezzi e payments POSITIVI.
-    FIC gestisce internamente l'inversione di segno per le NDC.
-    """
     client_data = get_client_by_id(client_id)
     if not client_data:
         return None, f"Cliente con ID {client_id} non trovato"
@@ -204,25 +209,21 @@ def sanitize_payment(p):
     for k, v in p.items():
         if v is None:
             continue
-        # payment_account è un oggetto: estrai solo l'id
         if k == "payment_account":
             if hasattr(v, 'to_dict'):
                 v = v.to_dict()
             if isinstance(v, dict) and v.get("id"):
                 result[k] = {"id": v["id"]}
             continue
-        # payment_terms è un oggetto
         if k == "payment_terms":
             if hasattr(v, 'to_dict'):
                 v = v.to_dict()
             if isinstance(v, dict):
                 result[k] = v
             continue
-        # status: rimuovi prefisso enum
         if k == "status":
             result[k] = str(v).replace("IssuedDocumentStatus.", "")
             continue
-        # date objects
         if hasattr(v, 'strftime'):
             result[k] = str(v)
             continue
@@ -406,7 +407,7 @@ async def list_tools():
         ),
         Tool(
             name="update_document",
-            description="Modifica parziale di un documento BOZZA (fattura, NDC, proforma). Passa solo i campi da aggiornare: se non passi 'items', le righe restano invariate. Funziona solo su documenti non ancora inviati allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            description="Modifica parziale di un documento BOZZA (fattura, NDC, proforma). Passa solo i campi da aggiornare. Funziona solo su documenti non ancora inviati allo SDI. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -425,7 +426,7 @@ async def list_tools():
         ),
         Tool(
             name="mark_payment_paid",
-            description="Segna una scadenza di pagamento come pagata. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
+            description="Segna una scadenza di pagamento come pagata. Richiede un conto di saldo: usa list_payment_accounts per vedere quelli disponibili. IMPORTANTE: Chiedere sempre conferma all'utente prima di eseguire.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -643,16 +644,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 company_id=COMPANY_ID, document_id=doc_id, fieldset="detailed"
             )
             d = response.data.to_dict()
-            doc_type = d.get("type", "invoice")
-            number = d.get("number")
-            client = d.get("entity", {}).get("name") if d.get("entity") else ""
             attachment_url = d.get("attachment_url") or d.get("url") or ""
             web_url = f"https://secure.fattureincloud.it/issued-documents-view-{doc_id}"
             result = {
                 "id": doc_id,
-                "number": number,
-                "type": doc_type,
-                "client": client,
+                "number": d.get("number"),
+                "type": d.get("type", "invoice"),
+                "client": d.get("entity", {}).get("name") if d.get("entity") else "",
                 "attachment_url": attachment_url,
                 "web_url": web_url,
                 "note": "attachment_url è il PDF diretto (se disponibile). web_url apre il documento nel browser FIC."
@@ -660,18 +658,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "list_payment_accounts":
-            response = payment_accounts_api.list_payment_accounts(company_id=COMPANY_ID)
-            accounts = []
-            for a in (response.data or []):
-                d = a.to_dict()
-                accounts.append({
-                    "id": d.get("id"),
-                    "name": d.get("name"),
-                    "type": d.get("type"),
-                    "iban": d.get("iban"),
-                    "virtual": d.get("virtual", False)
-                })
-            return [TextContent(type="text", text=json.dumps(accounts, indent=2, ensure_ascii=False))]
+            accounts = get_payment_accounts()
+            result = [{"id": a.get("id"), "name": a.get("name"), "type": a.get("type"),
+                       "iban": a.get("iban")} for a in accounts]
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "list_clients":
             query = arguments.get("query")
@@ -897,22 +887,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Determina payment_account_id
             account_id = arguments.get("payment_account_id")
             if not account_id:
-                # Prova a prenderlo dalla scadenza esistente
                 existing_pa = payments[payment_index].get("payment_account")
                 if hasattr(existing_pa, 'to_dict'):
                     existing_pa = existing_pa.to_dict()
                 if isinstance(existing_pa, dict):
                     account_id = existing_pa.get("id")
             if not account_id:
-                # Auto-fetch del primo conto disponibile
                 account_id = get_default_payment_account_id()
             if not account_id:
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
-                    "error": "Nessun conto di pagamento configurato in FIC. Usa list_payment_accounts per verificare."
+                    "error": "Nessun conto di pagamento trovato. Configura un conto in FIC o usa list_payment_accounts."
                 }, ensure_ascii=False))]
 
-            # Costruisce lista pagamenti aggiornata
             new_payments = []
             for i, p in enumerate(payments):
                 p_clean = sanitize_payment(p)
@@ -964,7 +951,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if payment_index >= len(payments):
                 return [TextContent(type="text", text=json.dumps({
                     "success": False,
-                    "error": f"Scadenza {payment_index} non trovata. Il documento ha {len(payments)} scadenze."
+                    "error": f"Scadenza {payment_index} non trovata."
                 }, ensure_ascii=False))]
 
             new_payments = []
