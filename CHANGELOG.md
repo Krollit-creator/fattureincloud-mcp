@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.6.4
+- FIX: `create_credit_note` — prezzi e payment positivi, FIC inverte internamente per type=credit_note
+- FIX: `update_document` — stessa logica per NDC
+
+## v1.6.3
+- FIX: tentativo NDC senza payments_list (non funzionava)
+
+## v1.6.2
+- FIX: tentativo NDC con payment negativo (non funzionava)
+
+## v1.6.1
+- FIX: tentativo abs() su payment per NDC (non funzionava)
+
 ## v1.6.0
 - NEW: `update_document` — modifica parziale di qualsiasi documento bozza (fattura, NDC, proforma): data, oggetto, righe, giorni pagamento. Carica l'originale e applica solo i campi passati.
 
