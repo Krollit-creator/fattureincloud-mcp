@@ -16,7 +16,7 @@ import os
 
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
-from starlette.routing import Mount, Route
+from starlette.routing import Mount
 
 # Importa l'istanza Server gia' configurata da server.py.
 # In questo modo non duplichiamo logica e il fork rimane allineato con l'upstream.
@@ -26,13 +26,17 @@ from server import app
 sse_transport = SseServerTransport("/messages/")
 
 
-async def handle_sse(request):
-    """Gestisce la connessione SSE in entrata da un client MCP (es. Claude.ai)."""
-    async with sse_transport.connect_sse(
-        request.scope,
-        request.receive,
-        request._send,
-    ) as (read_stream, write_stream):
+async def handle_sse(scope, receive, send):
+    """ASGI handler per la connessione SSE in entrata da un client MCP (es. Claude.ai).
+
+    Usiamo un handler ASGI puro (scope/receive/send) montato via Mount invece
+    di un endpoint Starlette, perche' SSE non ritorna una Response normale
+    ma tiene la connessione aperta per tutta la durata della sessione MCP.
+    """
+    async with sse_transport.connect_sse(scope, receive, send) as (
+        read_stream,
+        write_stream,
+    ):
         await app.run(
             read_stream,
             write_stream,
@@ -41,11 +45,11 @@ async def handle_sse(request):
 
 
 # Applicazione Starlette: due endpoint
-#  - GET  /sse        -> apre la connessione SSE
+#  - GET  /sse        -> apre la connessione SSE (ASGI app montata)
 #  - POST /messages/  -> riceve i messaggi MCP dal client
 starlette_app = Starlette(
     routes=[
-        Route("/sse", endpoint=handle_sse),
+        Mount("/sse", app=handle_sse),
         Mount("/messages/", app=sse_transport.handle_post_message),
     ],
 )
