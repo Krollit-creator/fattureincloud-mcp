@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""HTTP/SSE transport wrapper for Fatture in Cloud MCP Server.
+"""HTTP transport wrapper for Fatture in Cloud MCP Server.
 
-Espone il server MCP via HTTP/SSE per il deployment remoto (Railway, Docker, ecc.).
+Espone il server MCP via HTTP per il deployment remoto (Railway, Docker, ecc.).
 Per uso locale via stdio, avviare invece `server.py` direttamente.
+
+Vengono esposti DUE endpoint per massima compatibilita' con i client MCP:
+  - POST/GET /mcp        -> Streamable HTTP transport (raccomandato, usato da
+                            Claude.ai Custom Connectors)
+  - GET      /sse        -> SSE transport (compatibilita' legacy)
+  - POST     /messages/  -> endpoint POST per i messaggi del transport SSE
 
 Variabili d'ambiente lette:
 - PORT       : porta di ascolto (default: 8000, Railway la imposta automaticamente)
@@ -12,9 +18,11 @@ Le credenziali Fatture in Cloud (FIC_ACCESS_TOKEN, FIC_COMPANY_ID, FIC_SENDER_EM
 sono lette da server.py al momento dell'import.
 """
 
+import contextlib
 import os
 
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
@@ -23,16 +31,32 @@ from starlette.routing import Mount
 from server import app
 
 
+# ---------------------------------------------------------------------------
+# Streamable HTTP transport (transport raccomandato per i client MCP moderni)
+# ---------------------------------------------------------------------------
+# Stateless mode: ogni richiesta e' indipendente, niente affinita' di sessione.
+# Adatto al deployment su Railway dove il container puo' essere ricreato.
+session_manager = StreamableHTTPSessionManager(
+    app=app,
+    event_store=None,
+    json_response=False,
+    stateless=True,
+)
+
+
+async def handle_streamable_http(scope, receive, send):
+    """ASGI handler per le richieste MCP via Streamable HTTP."""
+    await session_manager.handle_request(scope, receive, send)
+
+
+# ---------------------------------------------------------------------------
+# SSE transport (legacy, mantenuto per compatibilita' con vecchi client)
+# ---------------------------------------------------------------------------
 sse_transport = SseServerTransport("/messages/")
 
 
 async def handle_sse(scope, receive, send):
-    """ASGI handler per la connessione SSE in entrata da un client MCP (es. Claude.ai).
-
-    Usiamo un handler ASGI puro (scope/receive/send) montato via Mount invece
-    di un endpoint Starlette, perche' SSE non ritorna una Response normale
-    ma tiene la connessione aperta per tutta la durata della sessione MCP.
-    """
+    """ASGI handler per la connessione SSE (transport legacy)."""
     async with sse_transport.connect_sse(scope, receive, send) as (
         read_stream,
         write_stream,
@@ -44,14 +68,28 @@ async def handle_sse(scope, receive, send):
         )
 
 
-# Applicazione Starlette: due endpoint
-#  - GET  /sse        -> apre la connessione SSE (ASGI app montata)
-#  - POST /messages/  -> riceve i messaggi MCP dal client
+# ---------------------------------------------------------------------------
+# Lifespan: avvia/ferma il session manager dello Streamable HTTP
+# ---------------------------------------------------------------------------
+@contextlib.asynccontextmanager
+async def lifespan(_starlette_app):
+    """Gestisce il ciclo di vita del session manager Streamable HTTP."""
+    async with session_manager.run():
+        yield
+
+
+# ---------------------------------------------------------------------------
+# Applicazione Starlette
+# ---------------------------------------------------------------------------
 starlette_app = Starlette(
     routes=[
+        # Streamable HTTP - endpoint moderno (raccomandato)
+        Mount("/mcp", app=handle_streamable_http),
+        # SSE - endpoint legacy
         Mount("/sse", app=handle_sse),
         Mount("/messages/", app=sse_transport.handle_post_message),
     ],
+    lifespan=lifespan,
 )
 
 
